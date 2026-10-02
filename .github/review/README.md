@@ -79,8 +79,11 @@ publication/deduplication, and workflow-boundary tests on GitHub without a model
 These fixtures verify the program's decisions, not AI bug-detection quality.
 
 After the `review-tests/docs-clean` PR passes its real CI, **Review publisher
-integration** runs automatically once for that head/base. It can also be run
-manually on `main`. This fork-only test uses a visibly marked
+integration** runs automatically once for that head/base, as a sequential step
+after the controller publishes its results. It can also be run manually on
+`main`. Sharing a concurrency group between two independently triggered
+workflows could discard a pending integration run, so automatic integration is
+part of the controller itself. This fork-only test uses a visibly marked
 synthetic result to exercise actual GitHub approval, deduplication, COMMENT and
 approval dismissal APIs. It always attempts to withdraw its temporary approval.
 It has no model key, does not establish AI quality, and uploads its observations

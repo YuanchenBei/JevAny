@@ -77,3 +77,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_REVIEW_MODE: ${{ vars.PR_REVIEW_MODE || 'report-only' }}
         run: python .github/review/review.py publish --input review-artifact/review-result.json
+      - name: Validate publisher APIs on the dedicated pilot fixture
+        if: github.repository == 'YuanchenBei/JevAny'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/review/integration.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: publisher-integration-result
+          path: integration-result.json
+          retention-days: 7
