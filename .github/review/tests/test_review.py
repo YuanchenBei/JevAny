@@ -151,6 +151,24 @@ class PolicyTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_fork_run_without_pr_array_uses_pinned_event_identity(self):
+        value = run()
+        value.update(pull_requests=[], head_repository={"full_name": pr()["head"]["repo"]["full_name"]},
+                     display_title=f"PR #1 | base {pr()['base']['sha']} | head {pr()['head']['sha']}")
+        self.assertEqual(r.select_ci_run([value], pr()), value)
+        moved = pr()
+        moved["base"]["sha"] = "d" * 40
+        self.assertIsNone(r.select_ci_run([value], moved))
+        value["head_repository"]["full_name"] = "another/repo"
+        self.assertIsNone(r.select_ci_run([value], pr()))
+
+    def test_legacy_fork_ci_without_base_evidence_requires_human(self):
+        gh = FakeGitHub()
+        gh.runs[0].update(pull_requests=[], head_repository={"full_name": pr()["head"]["repo"]["full_name"]})
+        evidence = r.ci_evidence(gh, pr(), [file("jevany/model.py")])
+        self.assertEqual(evidence[0]["state"], "incomplete")
+        self.assertEqual(r.ci_state(evidence), "human-review")
+
     def test_ci_ignores_push_other_pr_old_head_and_old_base(self):
         for mutate in [lambda x: x.update(event="push"), lambda x: x.update(head_sha="old"),
                        lambda x: x["pull_requests"][0].update(number=2),
@@ -250,6 +268,37 @@ class PublicationTests(unittest.TestCase):
         gh = FakeGitHub()
         self.publish(gh, mode="report-only")
         self.assertEqual(gh.reviews[0]["event"], "COMMENT")
+        self.assertNotIn({"name": "ai:approved"}, gh.pr["labels"])
+
+    def test_rejected_review_cannot_apply_approved_label(self):
+        gh = FakeGitHub()
+        original = gh.repo_call
+
+        def reject(path, method="GET", body=None):
+            if path == "/pulls/1/reviews" and method == "POST":
+                raise r.ReviewError("GitHub rejected approval")
+            return original(path, method, body)
+
+        with patch.object(gh, "repo_call", side_effect=reject):
+            with self.assertRaises(r.ReviewError):
+                self.publish(gh)
+        self.assertNotIn({"name": "ai:approved"}, gh.pr["labels"])
+
+    def test_approval_disabled_falls_back_to_human_review(self):
+        gh = FakeGitHub()
+        original = gh.repo_call
+
+        def reject_approval(path, method="GET", body=None):
+            if path == "/pulls/1/reviews" and method == "POST" and body["event"] == "APPROVE":
+                raise r.ReviewError("GitHub Actions is not permitted to approve pull requests")
+            return original(path, method, body)
+
+        with patch.object(gh, "repo_call", side_effect=reject_approval):
+            self.assertEqual(self.publish(gh), "human-review")
+        self.assertEqual(gh.reviews[-1]["event"], "COMMENT")
+        self.assertIn({"name": "ai:human-review"}, gh.pr["labels"])
+        self.assertNotIn({"name": "ai:approved"}, gh.pr["labels"])
+        self.assertIn("not permitted", gh.comments[0]["body"])
 
     def test_pending_never_posts_final_review(self):
         gh = FakeGitHub()

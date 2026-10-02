@@ -40,7 +40,7 @@ def request_json(url, token, method="GET", body=None, timeout=60):
     request = urllib.request.Request(
         url, method=method,
         data=None if body is None else json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
                  "Content-Type": "application/json", "User-Agent": "JevAny-PR-review"},
     )
     try:
@@ -50,8 +50,18 @@ def request_json(url, token, method="GET", body=None, timeout=60):
                 raise ReviewError("API response exceeds the review size limit")
             return json.loads(raw) if raw else None
     except urllib.error.HTTPError as error:
-        # Never include response bodies, headers or credentials in public reports.
-        raise ReviewError(f"API request failed (HTTP {error.code})") from None
+        # OpenAI errors can echo a key: keep them generic. GitHub validation
+        # details are limited to public API error fields, never request headers.
+        detail = ""
+        if urllib.parse.urlparse(url).hostname == "api.github.com":
+            try:
+                data = json.loads(error.read(10000))
+                messages = [data.get("message", "")]
+                messages += [json.dumps(item) for item in data.get("errors", [])]
+                detail = ": " + "; ".join(m for m in messages if m)[:800]
+            except (ValueError, AttributeError):
+                pass
+        raise ReviewError(f"API request failed (HTTP {error.code}){detail}") from None
     except (urllib.error.URLError, TimeoutError, ValueError):
         raise ReviewError("API request timed out, failed, or returned invalid JSON") from None
 
@@ -119,6 +129,13 @@ def select_ci_run(runs, pr):
     for run in runs:
         if run["event"] != "pull_request" or run["head_sha"] != pr["head"]["sha"]:
             continue
+        # GitHub returns an empty pull_requests array for cross-repository PRs.
+        # The CI's run-name captures immutable event head/base identifiers.
+        identity = f"PR #{pr['number']} | base {pr['base']['sha']} | head {pr['head']['sha']}"
+        if (run.get("display_title") == identity
+                and run.get("head_repository", {}).get("full_name") == pr["head"]["repo"]["full_name"]):
+            matches_pr.append(run)
+            continue
         for linked in run.get("pull_requests", []):
             if (linked["number"] == pr["number"]
                     and linked["head"]["sha"] == pr["head"]["sha"]
@@ -134,7 +151,16 @@ def ci_evidence(gh, pr, files):
         runs = gh.pages(f"/actions/workflows/{workflow}/runs?event=pull_request&head_sha={pr['head']['sha']}", "workflow_runs")
         run = select_ci_run(runs, pr)
         if run is None:
-            checks.append({"workflow": workflow, "state": "missing", "reason": "No CI run for this PR head and base"})
+            candidates = [candidate for candidate in runs if candidate["event"] == "pull_request"
+                          and candidate["head_sha"] == pr["head"]["sha"]
+                          and candidate.get("head_repository", {}).get("full_name") == pr["head"]["repo"]["full_name"]]
+            if candidates:
+                latest = max(candidates, key=lambda item: (item["run_number"], item.get("run_attempt", 1)))
+                checks.append({"workflow": workflow, "id": latest["id"], "attempt": latest.get("run_attempt", 1),
+                               "state": "incomplete" if latest["status"] == "completed" else "pending",
+                               "reason": "CI cannot be bound to the current PR/base. Update the branch from main and run CI again."})
+            else:
+                checks.append({"workflow": workflow, "state": "missing", "reason": "No CI run for this PR head and base"})
             continue
         record = {"workflow": workflow, "id": run["id"], "attempt": run.get("run_attempt", 1),
                   "head": run["head_sha"], "url": run["html_url"]}
@@ -297,7 +323,7 @@ def review_model(context, sources, key, model):
 def decide(files, checks, result, error=None):
     state = ci_state(checks)
     if state == "human-review":
-        return state, ["Applicable CI failed or expected jobs were not successfully executed."]
+        return state, ["Applicable CI failed or cannot be verified for this PR revision; see the CI evidence below."]
     if state == "pending":
         return state, ["Waiting for CI evidence for this exact PR head and base."]
     if error:
@@ -436,14 +462,6 @@ def publish_one(gh, record, mode):
     if len(body) > 60000:
         raise ReviewError("Rendered review exceeds GitHub's comment limit")
     comments = [c for c in gh.pages(f"/issues/{number}/comments") if own(c)]
-    # Only the two managed labels are touched; never replace contributors' labels.
-    label = LABELS.get(record["decision"])
-    existing = {item["name"] for item in pr["labels"]}
-    for managed in LABELS.values():
-        if managed in existing and managed != label:
-            gh.repo_call(f"/issues/{number}/labels/{urllib.parse.quote(managed, safe='')}", "DELETE")
-    if label and label not in existing:
-        gh.repo_call(f"/issues/{number}/labels", "POST", {"labels": [label]})
     reviews = gh.pages(f"/pulls/{number}/reviews")
     event = "APPROVE" if approve else "COMMENT"
     review_key = f"<!-- review:{record['fingerprint']}:{event} -->"
@@ -452,10 +470,34 @@ def publish_one(gh, record, mode):
         if not current(fresh, expected):
             invalidate(gh, fresh)
             return "stale"
-        gh.repo_call(f"/pulls/{number}/reviews", "POST", {
-            "commit_id": expected["head"], "event": event,
-            "body": f"{MARKER}\n{review_key}\n{record['decision'].title()}. See the maintained PR review summary for evidence."
-        })
+        try:
+            gh.repo_call(f"/pulls/{number}/reviews", "POST", {
+                "commit_id": expected["head"], "event": event,
+                "body": f"{MARKER}\n{review_key}\n{record['decision'].title()}. See the maintained PR review summary for evidence."
+            })
+        except ReviewError as exc:
+            if not approve:
+                raise
+            withdraw_approvals(gh, number)
+            approve = False
+            record = dict(record, decision="human-review", retryable=True,
+                          reasons=[f"GitHub did not accept the approval: {exc}"])
+            body = render(gh, record)
+            fallback_key = f"<!-- review:{record['fingerprint']}:COMMENT -->"
+            if not any(own(v) and fallback_key in v["body"] for v in reviews):
+                gh.repo_call(f"/pulls/{number}/reviews", "POST", {
+                    "commit_id": expected["head"], "event": "COMMENT",
+                    "body": f"{MARKER}\n{fallback_key}\nHuman Review. GitHub did not accept automated approval; see the maintained summary."
+                })
+    # Only apply the success label after GitHub actually accepts the review.
+    # Report-only Pass is shown in the summary, not as an approval label.
+    label = LABELS.get(record["decision"]) if record["decision"] != "pass" or approve else None
+    existing = {item["name"] for item in pr["labels"]}
+    for managed in LABELS.values():
+        if managed in existing and managed != label:
+            gh.repo_call(f"/issues/{number}/labels/{urllib.parse.quote(managed, safe='')}", "DELETE")
+    if label and label not in existing:
+        gh.repo_call(f"/issues/{number}/labels", "POST", {"labels": [label]})
     # Publish the completion marker only after the review API succeeded.
     if comments:
         if comments[-1]["body"] != body:
