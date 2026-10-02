@@ -78,8 +78,9 @@ retryable. Run the workflow manually to retry a configuration or service failure
 publication/deduplication, and workflow-boundary tests on GitHub without a model.
 These fixtures verify the program's decisions, not AI bug-detection quality.
 
-After the `review-tests/docs-clean` PR passes its real CI, manually run **Review
-publisher integration** on `main`. This fork-only test uses a visibly marked
+After the `review-tests/docs-clean` PR passes its real CI, **Review publisher
+integration** runs automatically once for that head/base. It can also be run
+manually on `main`. This fork-only test uses a visibly marked
 synthetic result to exercise actual GitHub approval, deduplication, COMMENT and
 approval dismissal APIs. It always attempts to withdraw its temporary approval.
 It has no model key, does not establish AI quality, and uploads its observations

@@ -433,6 +433,8 @@ def publish_one(gh, record, mode):
         raise ReviewError("Publication invariants failed; approval refused")
     withdraw_approvals(gh, number, keep_head=expected["head"] if approve else None)
     body = render(gh, record)
+    if len(body) > 60000:
+        raise ReviewError("Rendered review exceeds GitHub's comment limit")
     comments = [c for c in gh.pages(f"/issues/{number}/comments") if own(c)]
     # Only the two managed labels are touched; never replace contributors' labels.
     label = LABELS.get(record["decision"])

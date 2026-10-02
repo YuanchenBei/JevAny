@@ -15,11 +15,16 @@ def main():
     if os.environ["GITHUB_REPOSITORY"] != "YuanchenBei/JevAny":
         raise r.ReviewError("Integration fixture is restricted to the testing fork")
     gh = r.GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"])
+
+    def skip(reason):
+        Path("integration-result.json").write_text(json.dumps({"status": "not-run", "reason": reason, "ai_tested": False}))
+        print(reason)
+
     candidates = [p for p in gh.pages("/pulls?state=open")
                   if p["head"]["ref"] == "review-tests/docs-clean"
                   and p["head"]["repo"]["full_name"] == gh.repo]
     if len(candidates) != 1:
-        raise r.ReviewError("Open exactly one review-tests/docs-clean PR in the testing fork")
+        return skip("Waiting for the dedicated review-tests/docs-clean fixture PR")
     pr = gh.repo_call(f"/pulls/{candidates[0]['number']}")
     number = pr["number"]
     files = gh.pages(f"/pulls/{number}/files")
@@ -27,7 +32,12 @@ def main():
         raise r.ReviewError("Integration PR must only change docs/PR_REVIEW_PILOT.md and be ready")
     checks = r.ci_evidence(gh, pr, files)
     if r.ci_state(checks) != "passed":
-        raise r.ReviewError("The dedicated fixture PR's actual CI must pass before API integration testing")
+        return skip("Waiting for the fixture PR's actual CI to pass at the current head/base")
+    integration_key = r.digest(["api-integration", r.snapshot(pr)])
+    completed_key = r.digest([integration_key, "withdraw"])
+    reviews = gh.pages(f"/pulls/{number}/reviews")
+    if any(r.own(v) and f"<!-- review:{completed_key}:COMMENT -->" in v["body"] for v in reviews):
+        return skip("Publisher integration already completed for this fixture head/base")
     context, sources = r.collect_context(gh, pr, files)
     result = {"summary": "SYNTHETIC INTEGRATION FIXTURE: no AI call was made. This tests only GitHub publication and approval withdrawal.",
               "coverage_complete": True, "uncertainties": [], "findings": []}
@@ -35,7 +45,7 @@ def main():
     record = {"snapshot": r.snapshot(pr), "files": files, "ci": checks, "result": result,
               "sources": {path: {"old_path": source["old_path"]} for path, source in sources.items()},
               "merge_base": context["merge_base"], "model": {"model": "synthetic-integration-fixture-NOT-AI"},
-              "fingerprint": r.digest(["api-integration", os.environ["GITHUB_RUN_ID"], r.snapshot(pr)]),
+              "fingerprint": integration_key,
               "mode": "auto-approve", "decision": "pass", "retryable": True,
               "reasons": ["Synthetic publisher test; any approval is temporary and is withdrawn before this test finishes."]}
     outcomes = []

@@ -2,6 +2,9 @@ name: Review publisher integration
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: [ci, Deploy homepage]
+    types: [completed]
 
 permissions:
   contents: read
