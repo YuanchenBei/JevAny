@@ -25,7 +25,7 @@ def main():
                   and p["head"]["repo"]["full_name"] == gh.repo]
     if len(candidates) != 1:
         return skip("Waiting for the dedicated review-tests/docs-clean fixture PR")
-    pr = gh.repo_call(f"/pulls/{candidates[0]['number']}")
+    pr = r.load_pr(gh, candidates[0]['number'])
     number = pr["number"]
     files = gh.pages(f"/pulls/{number}/files")
     if [f["filename"] for f in files] != ["docs/PR_REVIEW_PILOT.md"] or pr["draft"]:
