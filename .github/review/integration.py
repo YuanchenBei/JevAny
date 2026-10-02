@@ -50,7 +50,7 @@ def main():
               "reasons": ["Synthetic publisher test; any approval is temporary and is withdrawn before this test finishes."]}
     outcomes = []
     try:
-        assert r.publish_one(gh, record, "auto-approve") == "pass"
+        assert r.publish_one(gh, record, "auto-approve") == "pass", "GitHub approval was not accepted; inspect the PR summary for the validation reason"
         reviews = gh.pages(f"/pulls/{number}/reviews")
         approved = [v for v in reviews if r.own(v) and v["state"] == "APPROVED"
                     and v["commit_id"] == pr["head"]["sha"]]

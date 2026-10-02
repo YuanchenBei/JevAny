@@ -2,9 +2,9 @@ name: Review publisher integration
 
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows: [ci, Deploy homepage]
-    types: [completed]
+  push:
+    branches: [automation/pr-review]
+    paths: ['.github/review/**', '.github/workflows/pr-review-integration.yml']
 
 permissions:
   contents: read
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   publisher-api:
-    if: github.repository == 'YuanchenBei/JevAny' && github.ref == 'refs/heads/main'
+    if: github.repository == 'YuanchenBei/JevAny' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/automation/pr-review')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
