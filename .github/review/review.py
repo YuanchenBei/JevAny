@@ -40,7 +40,7 @@ def request_json(url, token, method="GET", body=None, timeout=60):
     request = urllib.request.Request(
         url, method=method,
         data=None if body is None else json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
                  "Content-Type": "application/json", "User-Agent": "JevAny-PR-review"},
     )
     try:
@@ -50,13 +50,14 @@ def request_json(url, token, method="GET", body=None, timeout=60):
                 raise ReviewError("API response exceeds the review size limit")
             return json.loads(raw) if raw else None
     except urllib.error.HTTPError as error:
-        # Never include response bodies, headers or credentials in public reports.
+        # OpenAI errors can echo a key: keep them generic. GitHub validation
+        # details are limited to public API error fields, never request headers.
         detail = ""
         if urllib.parse.urlparse(url).hostname == "api.github.com":
             try:
                 data = json.loads(error.read(10000))
                 messages = [data.get("message", "")]
-                messages += [item.get("message", "") for item in data.get("errors", []) if isinstance(item, dict)]
+                messages += [json.dumps(item) for item in data.get("errors", [])]
                 detail = ": " + "; ".join(m for m in messages if m)[:800]
             except (ValueError, AttributeError):
                 pass
@@ -150,7 +151,16 @@ def ci_evidence(gh, pr, files):
         runs = gh.pages(f"/actions/workflows/{workflow}/runs?event=pull_request&head_sha={pr['head']['sha']}", "workflow_runs")
         run = select_ci_run(runs, pr)
         if run is None:
-            checks.append({"workflow": workflow, "state": "missing", "reason": "No CI run for this PR head and base"})
+            candidates = [candidate for candidate in runs if candidate["event"] == "pull_request"
+                          and candidate["head_sha"] == pr["head"]["sha"]
+                          and candidate.get("head_repository", {}).get("full_name") == pr["head"]["repo"]["full_name"]]
+            if candidates:
+                latest = max(candidates, key=lambda item: (item["run_number"], item.get("run_attempt", 1)))
+                checks.append({"workflow": workflow, "id": latest["id"], "attempt": latest.get("run_attempt", 1),
+                               "state": "incomplete" if latest["status"] == "completed" else "pending",
+                               "reason": "CI cannot be bound to the current PR/base. Update the branch from main and run CI again."})
+            else:
+                checks.append({"workflow": workflow, "state": "missing", "reason": "No CI run for this PR head and base"})
             continue
         record = {"workflow": workflow, "id": run["id"], "attempt": run.get("run_attempt", 1),
                   "head": run["head_sha"], "url": run["html_url"]}

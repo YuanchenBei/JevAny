@@ -162,6 +162,13 @@ class EvidenceTests(unittest.TestCase):
         value["head_repository"]["full_name"] = "another/repo"
         self.assertIsNone(r.select_ci_run([value], pr()))
 
+    def test_legacy_fork_ci_without_base_evidence_requires_human(self):
+        gh = FakeGitHub()
+        gh.runs[0].update(pull_requests=[], head_repository={"full_name": pr()["head"]["repo"]["full_name"]})
+        evidence = r.ci_evidence(gh, pr(), [file("jevany/model.py")])
+        self.assertEqual(evidence[0]["state"], "incomplete")
+        self.assertEqual(r.ci_state(evidence), "human-review")
+
     def test_ci_ignores_push_other_pr_old_head_and_old_base(self):
         for mutate in [lambda x: x.update(event="push"), lambda x: x.update(head_sha="old"),
                        lambda x: x["pull_requests"][0].update(number=2),

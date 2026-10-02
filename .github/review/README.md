@@ -58,6 +58,9 @@ CPU CI is not evidence of GPU correctness or production-model performance.
 CI and Pages record the PR number, head and base in `run-name`. This preserves
 event identity when GitHub omits the PR association array for an external fork.
 It changes the displayed run title, not the existing tests or their scope.
+Existing external branches using the older workflow must update from `main` to
+record this identity. A successful legacy fork run without base evidence is
+reported as Human Review, never silently accepted as current CI.
 The Pages deployment job remains limited to the upstream repository; this test
 fork runs the website checks without publishing a duplicate website.
 
@@ -93,6 +96,9 @@ synthetic result to exercise actual GitHub approval, deduplication, COMMENT and
 approval dismissal APIs. It always attempts to withdraw its temporary approval.
 It has no model key, does not establish AI quality, and uploads its observations
 as an artifact. The regular controller remains in report-only mode throughout.
+During development, pushes to the trusted `automation/pr-review` branch also
+run this integration test, allowing publisher changes to be tested before
+updating the fork's default branch. It never checks out the fixture PR's code.
 
 Integration acceptance requires separate real PRs targeting this fork's `main`:
 
