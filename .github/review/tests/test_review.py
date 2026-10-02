@@ -328,7 +328,8 @@ class WorkflowTests(unittest.TestCase):
 
     def test_trusted_checkout_and_separate_permissions(self):
         workflow = yaml.safe_load((ROOT.parent / "workflows/pr-review.yml").read_text())
-        self.assertIn("pull_request_target", workflow[True])
+        self.assertNotIn("pull_request_target", workflow[True])
+        self.assertIn("PR review signal", workflow[True]["workflow_run"]["workflows"])
         evaluate, publish = workflow["jobs"]["evaluate"], workflow["jobs"]["publish"]
         self.assertEqual(evaluate["permissions"]["pull-requests"], "read")
         self.assertEqual(publish["permissions"]["pull-requests"], "write")
@@ -341,6 +342,14 @@ class WorkflowTests(unittest.TestCase):
                     self.assertEqual(step["with"]["ref"], "${{ github.workflow_sha }}")
                     self.assertFalse(step["with"]["persist-credentials"])
                 self.assertNotIn("github.event.pull_request", step.get("run", ""))
+
+    def test_signal_has_no_checkout_secrets_or_write_permissions(self):
+        workflow = yaml.safe_load((ROOT.parent / "workflows/pr-review-signal.yml").read_text())
+        self.assertEqual(workflow["permissions"], {})
+        self.assertIn("ready_for_review", workflow[True]["pull_request"]["types"])
+        for step in workflow["jobs"]["signal"]["steps"]:
+            self.assertNotIn("uses", step)
+            self.assertNotIn("${{", step["run"])
 
 
 if __name__ == "__main__":

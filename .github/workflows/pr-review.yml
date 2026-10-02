@@ -1,12 +1,9 @@
 name: PR review
 
 on:
-  # This trusted controller NEVER checks out or executes a PR's code.
-  pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited, closed]
   workflow_run:
-    workflows: [ci, Deploy homepage]
-    types: [completed]
+    workflows: [ci, Deploy homepage, PR review signal]
+    types: [in_progress, completed]
   push:
     branches: [main]
   workflow_dispatch:

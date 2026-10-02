@@ -44,6 +44,11 @@ files, prompts, and workflow changes are never executed by a job with the model
 key or review write permission. PR content is fetched through the GitHub API as
 data. The evaluation job is read-only; a separate job publishes only its same-run
 artifact. Neither job restores PR-controlled caches or artifacts from CI.
+PR metadata events pass through a no-checkout, no-secret, no-permission signal
+workflow. `workflow_run` executes the controller on the default branch. The
+controller ignores the signal's contents and fetches GitHub state itself. No
+`pull_request_target` exception or event-policy opt-out is needed. Standard
+first-time fork contributor approvals for Actions still apply.
 
 CI is collected from `pull_request` runs for the same PR, head and base, with all
 expected jobs required to execute successfully. Main's green checks and skipped
