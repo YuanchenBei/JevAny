@@ -50,7 +50,7 @@ def request_json(url, token, method="GET", body=None, timeout=60):
                 raise ReviewError("API response exceeds the review size limit")
             return json.loads(raw) if raw else None
     except urllib.error.HTTPError as error:
-        # OpenAI errors can echo a key: keep them generic. GitHub validation
+        # Model API errors can echo a key: keep them generic. GitHub validation
         # details are limited to public API error fields, never request headers.
         detail = ""
         if urllib.parse.urlparse(url).hostname == "api.github.com":
@@ -305,29 +305,65 @@ def validate_result(result, sources):
     return result
 
 
-def review_model(context, sources, key, model):
+def model_configuration():
+    provider = os.getenv("PR_REVIEW_PROVIDER", "openai")
+    if provider not in ("openai", "openrouter"):
+        raise ReviewError("PR_REVIEW_PROVIDER must be openai or openrouter")
+    secret = "OPENROUTER_API_KEY" if provider == "openrouter" else "OPENAI_API_KEY"
+    return provider, os.getenv("PR_REVIEW_MODEL", ""), os.getenv(secret, "")
+
+
+def review_model(context, sources, key, model, provider="openai"):
+    if provider not in ("openai", "openrouter"):
+        raise ReviewError("Unsupported AI provider")
     if not key or not model:
-        raise ReviewError("AI review is not configured: set OPENAI_API_KEY and PR_REVIEW_MODEL")
-    response = request_json("https://api.openai.com/v1/responses", key, "POST", {
-        "model": model, "store": False, "max_output_tokens": POLICY["max_output_tokens"],
-        "instructions": PROMPT,
-        "input": [{"role": "user", "content": json.dumps(context, ensure_ascii=False)}],
-        "text": {"format": {"type": "json_schema", "name": "pr_review", "strict": True, "schema": SCHEMA}},
-    }, timeout=180)
-    if response.get("status") != "completed":
-        raise ReviewError("AI response was incomplete")
-    output = []
-    for item in response.get("output", []):
-        for content in item.get("content", []):
-            if content.get("type") == "refusal":
-                raise ReviewError("AI review was refused")
-            if content.get("type") == "output_text":
-                output.append(content["text"])
+        secret = "OPENROUTER_API_KEY" if provider == "openrouter" else "OPENAI_API_KEY"
+        raise ReviewError(f"AI review is not configured: set {secret} and PR_REVIEW_MODEL")
+    content = json.dumps(context, ensure_ascii=False)
+    schema = {"name": "pr_review", "strict": True, "schema": SCHEMA}
+    if provider == "openrouter":
+        response = request_json("https://openrouter.ai/api/v1/chat/completions", key, "POST", {
+            "model": model, "stream": False, "max_tokens": POLICY["max_output_tokens"],
+            "messages": [{"role": "system", "content": PROMPT}, {"role": "user", "content": content}],
+            "response_format": {"type": "json_schema", "json_schema": schema},
+            "provider": {"require_parameters": True},
+        }, timeout=180)
+    else:
+        response = request_json("https://api.openai.com/v1/responses", key, "POST", {
+            "model": model, "store": False, "max_output_tokens": POLICY["max_output_tokens"],
+            "instructions": PROMPT, "input": [{"role": "user", "content": content}],
+            "text": {"format": {"type": "json_schema", **schema}},
+        }, timeout=180)
     try:
-        result = validate_result(json.loads("".join(output)), sources)
+        if not isinstance(response, dict) or response.get("error"):
+            raise ReviewError("AI provider returned an error or invalid response")
+        if provider == "openrouter":
+            choices = response.get("choices", [])
+            if len(choices) != 1 or choices[0].get("finish_reason") != "stop":
+                raise ReviewError("AI response was incomplete")
+            message = choices[0]["message"]
+            if message.get("refusal") or message.get("tool_calls"):
+                raise ReviewError("AI review was refused or requested tools")
+            output = message["content"]
+            if not isinstance(output, str) or not output.strip():
+                raise ReviewError("AI response contained no review text")
+        else:
+            if response.get("status") != "completed":
+                raise ReviewError("AI response was incomplete")
+            parts = []
+            for item in response.get("output", []):
+                for part in item.get("content", []):
+                    if part.get("type") == "refusal":
+                        raise ReviewError("AI review was refused")
+                    if part.get("type") == "output_text":
+                        parts.append(part["text"])
+            output = "".join(parts)
+        result = validate_result(json.loads(output), sources)
+    except ReviewError:
+        raise
     except Exception:
         raise ReviewError("AI output failed schema or evidence-location validation") from None
-    return result, {"model": response.get("model", model), "response_id": response.get("id"),
+    return result, {"provider": provider, "model": response.get("model", model), "response_id": response.get("id"),
                     "usage": response.get("usage")}
 
 
@@ -354,18 +390,19 @@ def own(item):
     return item.get("user", {}).get("login") == BOT and MARKER in (item.get("body") or "")
 
 
-def fingerprint(expected, files, checks, model, mode, configured):
+def fingerprint(expected, files, checks, model, mode, configured, provider="openai"):
     return digest({"snapshot": expected, "files": files, "ci": checks, "model": model,
-                   "mode": mode, "configured": configured, "policy": POLICY, "prompt": PROMPT, "schema": SCHEMA,
+                   "mode": mode, "configured": configured, "provider": provider,
+                   "policy": POLICY, "prompt": PROMPT, "schema": SCHEMA,
                    "controller": hashlib.sha256((ROOT / "review.py").read_bytes()).hexdigest()})
 
 
-def evaluate_one(gh, pr, model, mode, key):
+def evaluate_one(gh, pr, model, mode, key, provider="openai"):
     files = gh.pages(f"/pulls/{pr['number']}/files")
     checks = ci_evidence(gh, pr, files)
     record = {"snapshot": snapshot(pr), "files": files, "ci": checks, "mode": mode,
               "result": None, "model": None, "sources": {}, "merge_base": None}
-    record["fingerprint"] = digest([fingerprint(record["snapshot"], files, checks, model, mode, bool(key)), pr["draft"]])
+    record["fingerprint"] = digest([fingerprint(record["snapshot"], files, checks, model, mode, bool(key), provider), pr["draft"]])
     comments = gh.pages(f"/issues/{pr['number']}/comments")
     key_marker = f"<!-- completed:{record['fingerprint']} -->"
     if any(own(c) and key_marker in c["body"] for c in comments):
@@ -374,7 +411,7 @@ def evaluate_one(gh, pr, model, mode, key):
     if ci_state(checks) == "passed" and not pr["draft"]:
         try:
             context, sources = collect_context(gh, pr, files)
-            record["result"], record["model"] = review_model(context, sources, key, model)
+            record["result"], record["model"] = review_model(context, sources, key, model, provider)
             record["sources"] = {path: {"old_path": value["old_path"]} for path, value in sources.items()}
             record["merge_base"] = context["merge_base"]
         except ReviewError as exc:
@@ -536,6 +573,7 @@ def main():
     if mode not in ("report-only", "auto-approve"):
         raise ReviewError("PR_REVIEW_MODE must be report-only or auto-approve")
     if args.command == "evaluate":
+        provider, model, key = model_configuration()
         prs = gh.pages("/pulls?state=open")
         if len(prs) > POLICY["max_open_prs"]:
             raise ReviewError("Too many open PRs for one review run")
@@ -544,7 +582,7 @@ def main():
             pr = load_pr(gh, item['number'])
             if not pr["head"]["repo"]:
                 continue
-            record = evaluate_one(gh, pr, os.getenv("PR_REVIEW_MODEL", ""), mode, os.getenv("OPENAI_API_KEY", ""))
+            record = evaluate_one(gh, pr, model, mode, key, provider)
             if record is not None:
                 records.append(record)
         Path(args.output).write_text(json.dumps({"repository": gh.repo, "records": records}, indent=2))

@@ -25,16 +25,23 @@ are informational labels, not merge requirements.
    Actions → General → Allow GitHub Actions to create and approve pull requests**.
    Workflow jobs request their own minimal permissions; global write access is
    unnecessary.
-2. Add an Actions secret `OPENAI_API_KEY` in the fork. Never commit the key.
-3. Add an Actions variable `PR_REVIEW_MODEL` with an accessible OpenAI model
-   supporting Responses API Structured Outputs. There is deliberately no hidden
-   model default. The request has no shell/tools and uses `store: false`.
+2. Select the provider with the Actions variable `PR_REVIEW_PROVIDER`:
+   `openai` (default) or `openrouter`. Add the corresponding Actions secret,
+   `OPENAI_API_KEY` or `OPENROUTER_API_KEY`. Never commit the key. An OpenRouter
+   key is sufficient when using OpenRouter; an OpenAI key is not also needed.
+3. Add an Actions variable `PR_REVIEW_MODEL` with an accessible model ID for that
+   provider. There is deliberately no default model in the regular controller.
+   OpenAI uses Responses API Structured Outputs with `store: false`. OpenRouter
+   uses Chat Completions with strict JSON Schema and `require_parameters: true`
+   so routing requires compatible endpoints. Both paths have no shell/tools and
+   validate the returned schema and finding locations. Truncation, refusal,
+   missing content and API errors require human review.
 4. `PR_REVIEW_MODE` defaults to `report-only`. Set the variable to `auto-approve`
    after inspecting the rule tests and pilot reviews. Then manually run **PR
    review** on `main` to reevaluate open PRs with the new configuration.
 
 Missing key/model produces Human Review and explicitly states that AI review has
-not completed. API usage is billed to the configured API project; no key is
+not completed. API usage is billed to the configured provider account; no key is
 needed for **Review workflow tests**.
 
 ## Evidence and trust boundaries
@@ -103,6 +110,22 @@ During development, pushes to the trusted `automation/pr-review` branch also
 run this integration test, allowing publisher changes to be tested before
 updating the fork's default branch. It never checks out the fixture PR's code.
 
+**OpenRouter review quality test** is a separate, billable test on GitHub. It
+runs on explicit pushes to the trusted `automation/openrouter-test` branch, or
+manually on that branch or `main` once installed there. Set only the
+`OPENROUTER_API_KEY` secret to run it; it explicitly uses `openai/gpt-5-mini`
+through OpenRouter without changing the regular controller's configuration.
+It first runs the deterministic tests and verifies current CI on the two open
+document fixtures. It then makes at most four model calls (two per fixture),
+with no automatic retry. A clean sample must Pass; the wrong-count sample must
+identify the 3,220 versus 724 factual error, not merely receive Human Review.
+Expectations are checked after the response and are not included in the model
+request. All validated observations and usage metadata are uploaded as an
+artifact. A separate job with no model key publishes the final observations as
+comments, in report-only mode, only if all four expectations hold. A failed
+quality test uploads its available observations without publishing approvals.
+Passing these small fixtures does not establish general review accuracy.
+
 Integration acceptance requires separate real PRs targeting this fork's `main`:
 
 | Sample | Expected result |
@@ -129,4 +152,5 @@ Start upstream in report-only mode before considering automatic approvals.
 References: [GitHub workflow events](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows),
 [secure Actions use](https://docs.github.com/en/actions/reference/security/secure-use),
 [reviews API](https://docs.github.com/en/rest/pulls/reviews),
-[Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs).
+[Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs),
+[OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs).
