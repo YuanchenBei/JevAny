@@ -119,6 +119,17 @@ def snapshot(pr):
             "base_ref": pr["base"]["ref"], "head_repo": pr["head"]["repo"]["full_name"]}
 
 
+def load_pr(gh, number):
+    pr = gh.repo_call(f"/pulls/{number}")
+    # GitHub can retain an older base.sha on an unchanged PR after main moves.
+    # Resolve the actual branch tip instead of treating that cached value as
+    # proof that a previously tested merge is still current.
+    ref = urllib.parse.quote(pr["base"]["ref"], safe="/")
+    tip = gh.repo_call(f"/git/ref/heads/{ref}")["object"]["sha"]
+    pr["base"] = dict(pr["base"], sha=tip)
+    return pr
+
+
 def current(pr, expected):
     return pr["state"] == "open" and not pr["draft"] and snapshot(pr) == expected
 
@@ -345,7 +356,8 @@ def own(item):
 
 def fingerprint(expected, files, checks, model, mode, configured):
     return digest({"snapshot": expected, "files": files, "ci": checks, "model": model,
-                   "mode": mode, "configured": configured, "policy": POLICY, "prompt": PROMPT, "schema": SCHEMA})
+                   "mode": mode, "configured": configured, "policy": POLICY, "prompt": PROMPT, "schema": SCHEMA,
+                   "controller": hashlib.sha256((ROOT / "review.py").read_bytes()).hexdigest()})
 
 
 def evaluate_one(gh, pr, model, mode, key):
@@ -440,7 +452,7 @@ def invalidate(gh, pr):
 def publish_one(gh, record, mode):
     expected = record["snapshot"]
     number = expected["number"]
-    pr = gh.repo_call(f"/pulls/{number}")
+    pr = load_pr(gh, number)
     if pr["state"] != "open":
         return "closed"
     if snapshot(pr) != expected:
@@ -466,7 +478,7 @@ def publish_one(gh, record, mode):
     event = "APPROVE" if approve else "COMMENT"
     review_key = f"<!-- review:{record['fingerprint']}:{event} -->"
     if record["decision"] != "pending" and not any(own(r) and review_key in r["body"] and r["state"] != "DISMISSED" for r in reviews):
-        fresh = gh.repo_call(f"/pulls/{number}")
+        fresh = load_pr(gh, number)
         if not current(fresh, expected):
             invalidate(gh, fresh)
             return "stale"
@@ -506,7 +518,7 @@ def publish_one(gh, record, mode):
         gh.repo_call(f"/issues/{number}/comments", "POST", {"body": body})
     # commit_id binds approval to the reviewed head; also detect a base/head race.
     if approve:
-        fresh = gh.repo_call(f"/pulls/{number}")
+        fresh = load_pr(gh, number)
         if not current(fresh, expected):
             invalidate(gh, fresh)
             return "stale"
@@ -529,7 +541,7 @@ def main():
             raise ReviewError("Too many open PRs for one review run")
         records = []
         for item in prs:
-            pr = gh.repo_call(f"/pulls/{item['number']}")
+            pr = load_pr(gh, item['number'])
             if not pr["head"]["repo"]:
                 continue
             record = evaluate_one(gh, pr, os.getenv("PR_REVIEW_MODEL", ""), mode, os.getenv("OPENAI_API_KEY", ""))

@@ -69,6 +69,7 @@ class FakeGitHub:
         self.jobs = [{"name": name, "status": "completed", "conclusion": "success"}
                      for name in ["test", "test (minimum ML versions)", "report appendix", "check"]]
         self.mutate_after_review = False
+        self.branch_tip = None
 
     def pages(self, path, key=None, max_pages=30):
         if "/comments" in path:
@@ -87,6 +88,8 @@ class FakeGitHub:
         self.calls.append((path, method, copy.deepcopy(body)))
         if path == "/pulls/1" and method == "GET":
             return copy.deepcopy(self.pr)
+        if path == "/git/ref/heads/main" and method == "GET":
+            return {"object": {"sha": self.branch_tip or self.pr["base"]["sha"]}}
         if path == "/pulls/1/reviews" and method == "POST":
             self.reviews.append(dict(body, id=len(self.reviews) + 1, user={"login": r.BOT},
                                      state="APPROVED" if body["event"] == "APPROVE" else "COMMENTED"))
@@ -312,6 +315,13 @@ class PublicationTests(unittest.TestCase):
             self.assertEqual(self.publish(gh), "stale")
             self.assertEqual(gh.reviews, [])
 
+    def test_cached_pr_base_cannot_hide_a_new_branch_tip(self):
+        gh = FakeGitHub()
+        gh.branch_tip = "d" * 40
+        self.assertEqual(gh.pr["base"]["sha"], pr()["base"]["sha"])
+        self.assertEqual(self.publish(gh), "stale")
+        self.assertEqual(gh.reviews, [])
+
     def test_closed_and_draft_prs_not_approved(self):
         gh = FakeGitHub()
         gh.pr["state"] = "closed"
@@ -359,7 +369,8 @@ class PublicationTests(unittest.TestCase):
         for path, method, body in gh.calls:
             self.assertNotIn("/merge", path)
             self.assertNotIn("/contents", path)
-            self.assertNotIn("/git/", path)
+            if "/git/" in path:
+                self.assertEqual(method, "GET")
             self.assertNotIn("REQUEST_CHANGES", json.dumps(body))
             self.assertFalse(method == "PATCH" and path.startswith("/pulls/"))
 
