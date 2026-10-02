@@ -323,7 +323,7 @@ def review_model(context, sources, key, model):
 def decide(files, checks, result, error=None):
     state = ci_state(checks)
     if state == "human-review":
-        return state, ["Applicable CI failed or expected jobs were not successfully executed."]
+        return state, ["Applicable CI failed or cannot be verified for this PR revision; see the CI evidence below."]
     if state == "pending":
         return state, ["Waiting for CI evidence for this exact PR head and base."]
     if error:
@@ -470,10 +470,25 @@ def publish_one(gh, record, mode):
         if not current(fresh, expected):
             invalidate(gh, fresh)
             return "stale"
-        gh.repo_call(f"/pulls/{number}/reviews", "POST", {
-            "commit_id": expected["head"], "event": event,
-            "body": f"{MARKER}\n{review_key}\n{record['decision'].title()}. See the maintained PR review summary for evidence."
-        })
+        try:
+            gh.repo_call(f"/pulls/{number}/reviews", "POST", {
+                "commit_id": expected["head"], "event": event,
+                "body": f"{MARKER}\n{review_key}\n{record['decision'].title()}. See the maintained PR review summary for evidence."
+            })
+        except ReviewError as exc:
+            if not approve:
+                raise
+            withdraw_approvals(gh, number)
+            approve = False
+            record = dict(record, decision="human-review", retryable=True,
+                          reasons=[f"GitHub did not accept the approval: {exc}"])
+            body = render(gh, record)
+            fallback_key = f"<!-- review:{record['fingerprint']}:COMMENT -->"
+            if not any(own(v) and fallback_key in v["body"] for v in reviews):
+                gh.repo_call(f"/pulls/{number}/reviews", "POST", {
+                    "commit_id": expected["head"], "event": "COMMENT",
+                    "body": f"{MARKER}\n{fallback_key}\nHuman Review. GitHub did not accept automated approval; see the maintained summary."
+                })
     # Only apply the success label after GitHub actually accepts the review.
     # Report-only Pass is shown in the summary, not as an approval label.
     label = LABELS.get(record["decision"]) if record["decision"] != "pass" or approve else None

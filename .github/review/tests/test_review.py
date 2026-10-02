@@ -284,6 +284,22 @@ class PublicationTests(unittest.TestCase):
                 self.publish(gh)
         self.assertNotIn({"name": "ai:approved"}, gh.pr["labels"])
 
+    def test_approval_disabled_falls_back_to_human_review(self):
+        gh = FakeGitHub()
+        original = gh.repo_call
+
+        def reject_approval(path, method="GET", body=None):
+            if path == "/pulls/1/reviews" and method == "POST" and body["event"] == "APPROVE":
+                raise r.ReviewError("GitHub Actions is not permitted to approve pull requests")
+            return original(path, method, body)
+
+        with patch.object(gh, "repo_call", side_effect=reject_approval):
+            self.assertEqual(self.publish(gh), "human-review")
+        self.assertEqual(gh.reviews[-1]["event"], "COMMENT")
+        self.assertIn({"name": "ai:human-review"}, gh.pr["labels"])
+        self.assertNotIn({"name": "ai:approved"}, gh.pr["labels"])
+        self.assertIn("not permitted", gh.comments[0]["body"])
+
     def test_pending_never_posts_final_review(self):
         gh = FakeGitHub()
         self.publish(gh, dict(record(), decision="pending"))
