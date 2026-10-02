@@ -79,6 +79,9 @@ No new merge restriction is installed. One repository-level concurrency group
 serializes runs; each run scans open PRs so coalesced queued events lose no PRs.
 Fingerprints deduplicate completed unchanged reviews. API/model failures remain
 retryable. Run the workflow manually to retry a configuration or service failure.
+The current base is resolved through the Git ref API: a PR's `base.sha` can
+remain cached at an older revision after the target branch moves. Controller
+code changes also invalidate the completed-review fingerprint.
 
 ## Validation
 
