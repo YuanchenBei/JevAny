@@ -63,7 +63,7 @@ jobs:
           path: _site
 
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.repository == 'SimpleJev/JevAny'
     needs: check
     runs-on: ubuntu-latest
     permissions:

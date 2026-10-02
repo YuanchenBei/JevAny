@@ -58,6 +58,8 @@ CPU CI is not evidence of GPU correctness or production-model performance.
 CI and Pages record the PR number, head and base in `run-name`. This preserves
 event identity when GitHub omits the PR association array for an external fork.
 It changes the displayed run title, not the existing tests or their scope.
+The Pages deployment job remains limited to the upstream repository; this test
+fork runs the website checks without publishing a duplicate website.
 
 Full old/new changed text and pinned base reference documents are supplied to the
 model. Binary, missing, truncated, symlink/submodule, or oversized content routes
