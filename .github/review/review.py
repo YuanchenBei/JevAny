@@ -51,7 +51,16 @@ def request_json(url, token, method="GET", body=None, timeout=60):
             return json.loads(raw) if raw else None
     except urllib.error.HTTPError as error:
         # Never include response bodies, headers or credentials in public reports.
-        raise ReviewError(f"API request failed (HTTP {error.code})") from None
+        detail = ""
+        if urllib.parse.urlparse(url).hostname == "api.github.com":
+            try:
+                data = json.loads(error.read(10000))
+                messages = [data.get("message", "")]
+                messages += [item.get("message", "") for item in data.get("errors", []) if isinstance(item, dict)]
+                detail = ": " + "; ".join(m for m in messages if m)[:800]
+            except (ValueError, AttributeError):
+                pass
+        raise ReviewError(f"API request failed (HTTP {error.code}){detail}") from None
     except (urllib.error.URLError, TimeoutError, ValueError):
         raise ReviewError("API request timed out, failed, or returned invalid JSON") from None
 
@@ -118,6 +127,13 @@ def select_ci_run(runs, pr):
     matches_pr = []
     for run in runs:
         if run["event"] != "pull_request" or run["head_sha"] != pr["head"]["sha"]:
+            continue
+        # GitHub returns an empty pull_requests array for cross-repository PRs.
+        # The CI's run-name captures immutable event head/base identifiers.
+        identity = f"PR #{pr['number']} | base {pr['base']['sha']} | head {pr['head']['sha']}"
+        if (run.get("display_title") == identity
+                and run.get("head_repository", {}).get("full_name") == pr["head"]["repo"]["full_name"]):
+            matches_pr.append(run)
             continue
         for linked in run.get("pull_requests", []):
             if (linked["number"] == pr["number"]
@@ -436,14 +452,6 @@ def publish_one(gh, record, mode):
     if len(body) > 60000:
         raise ReviewError("Rendered review exceeds GitHub's comment limit")
     comments = [c for c in gh.pages(f"/issues/{number}/comments") if own(c)]
-    # Only the two managed labels are touched; never replace contributors' labels.
-    label = LABELS.get(record["decision"])
-    existing = {item["name"] for item in pr["labels"]}
-    for managed in LABELS.values():
-        if managed in existing and managed != label:
-            gh.repo_call(f"/issues/{number}/labels/{urllib.parse.quote(managed, safe='')}", "DELETE")
-    if label and label not in existing:
-        gh.repo_call(f"/issues/{number}/labels", "POST", {"labels": [label]})
     reviews = gh.pages(f"/pulls/{number}/reviews")
     event = "APPROVE" if approve else "COMMENT"
     review_key = f"<!-- review:{record['fingerprint']}:{event} -->"
@@ -456,6 +464,15 @@ def publish_one(gh, record, mode):
             "commit_id": expected["head"], "event": event,
             "body": f"{MARKER}\n{review_key}\n{record['decision'].title()}. See the maintained PR review summary for evidence."
         })
+    # Only apply the success label after GitHub actually accepts the review.
+    # Report-only Pass is shown in the summary, not as an approval label.
+    label = LABELS.get(record["decision"]) if record["decision"] != "pass" or approve else None
+    existing = {item["name"] for item in pr["labels"]}
+    for managed in LABELS.values():
+        if managed in existing and managed != label:
+            gh.repo_call(f"/issues/{number}/labels/{urllib.parse.quote(managed, safe='')}", "DELETE")
+    if label and label not in existing:
+        gh.repo_call(f"/issues/{number}/labels", "POST", {"labels": [label]})
     # Publish the completion marker only after the review API succeeded.
     if comments:
         if comments[-1]["body"] != body:
