@@ -41,7 +41,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PR_REVIEW_PROVIDER: openrouter
-          PR_REVIEW_MODEL: nvidia/nemotron-3-super-120b-a12b:free
+          PR_REVIEW_MODEL: qwen/qwen3.8-27b:free
         run: python .github/review/free_model_test.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()

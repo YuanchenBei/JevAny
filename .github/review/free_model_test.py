@@ -10,7 +10,7 @@ from pathlib import Path
 
 import review as r
 
-FREE_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+FREE_MODEL = "qwen/qwen3.8-27b:free"
 
 
 def expected_result(branch, decision, result):
@@ -24,6 +24,7 @@ def expected_result(branch, decision, result):
         evidence = " ".join(finding[k] for k in ("title", "reason", "evidence")).replace(",", "")
         if (finding["category"] == "factual" and finding["side"] == "new"
                 and finding["file"] == "docs/PR_REVIEW_PILOT.md"
+                and finding["line"] == 5
                 and "3220" in evidence and "724" in evidence):
             return True
     return False
@@ -42,8 +43,12 @@ def main():
     model_info = matches[0]
     if any(float(model_info["pricing"].get(k, "-1")) != 0 for k in ("prompt", "completion")):
         raise r.ReviewError("The selected model is not listed at zero input/output token cost")
-    if not {"response_format", "structured_outputs", "max_tokens"}.issubset(model_info["supported_parameters"]):
-        raise r.ReviewError("The free model does not advertise the required structured-output parameters")
+    # The catalog lists structured_outputs but omits response_format for this
+    # model. Probe the unchanged production request to resolve that ambiguity;
+    # strict JSON Schema and require_parameters remain enabled in review.py.
+    missing = {"response_format", "structured_outputs", "max_tokens"} - set(model_info["supported_parameters"])
+    if missing:
+        print(f"Catalog omits {', '.join(sorted(missing))}; verifying the strict production request directly.")
     gh = r.GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"])
     branches = ("review-tests/docs-clean", "review-tests/docs-wrong-count")
     pulls = gh.pages("/pulls?state=open")
