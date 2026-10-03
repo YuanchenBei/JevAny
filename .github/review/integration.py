@@ -33,7 +33,7 @@ def main():
     checks = r.ci_evidence(gh, pr, files)
     if r.ci_state(checks) != "passed":
         return skip("Waiting for the fixture PR's actual CI to pass at the current head/base")
-    integration_key = r.digest(["api-integration", r.snapshot(pr)])
+    integration_key = r.digest(["api-integration", r.POLICY["version"], r.snapshot(pr)])
     completed_key = r.digest([integration_key, "withdraw"])
     reviews = gh.pages(f"/pulls/{number}/reviews")
     if any(r.own(v) and f"<!-- review:{completed_key}:COMMENT -->" in v["body"] for v in reviews):
@@ -50,6 +50,9 @@ def main():
               "reasons": ["Synthetic publisher test; any approval is temporary and is withdrawn before this test finishes."]}
     outcomes = []
     try:
+        access = r.collaborator_status(gh, pr)
+        assert access["verified"] and access["collaborator"], "Fixture author must be a verified current collaborator"
+        outcomes.append("GitHub confirmed the fixture PR author's current collaborator status")
         assert r.publish_one(gh, record, "auto-approve") == "pass", "GitHub approval was not accepted; inspect the PR summary for the validation reason"
         reviews = gh.pages(f"/pulls/{number}/reviews")
         approved = [v for v in reviews if r.own(v) and v["state"] == "APPROVED"

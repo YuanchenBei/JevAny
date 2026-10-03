@@ -7,9 +7,14 @@ The workflow is deliberately restricted to this fork during validation.
 ## Results
 
 - **Pass**: applicable CI jobs passed; every changed file was covered; no
-  substantive findings or unresolved uncertainties; ordinary documentation only.
-  In `auto-approve` mode the bot submits `APPROVE`.
-- **Human Review**: substantive issues, code/configuration changes, failed or
+  substantive findings or unresolved uncertainties. Code and configuration can
+  Pass as well as documentation. Publication is a separate decision:
+  - In `auto-approve` mode, ordinary documentation by a verified current
+    repository collaborator receives `APPROVE`.
+  - Code/configuration/mixed changes, documentation by a non-collaborator, an
+    unverifiable collaborator status, or `report-only` mode receive a Pass
+    summary and `COMMENT`, without approval.
+- **Human Review**: substantive issues, failed or
   incomplete CI, or an unavailable/incomplete model review. The bot submits
   `COMMENT`, with evidence in one maintained summary.
 - Running CI and draft PRs are temporary waiting states, never approvals.
@@ -18,6 +23,8 @@ There is no request-changes, close, merge, code-edit, or branch-protection actio
 CI failures remain failures. Style preferences and lack of GPU tests do not
 escalate an otherwise clean documentation PR. `ai:approved` and `ai:human-review`
 are informational labels, not merge requirements.
+`ai:approved` is applied only after GitHub accepts an actual approval, never
+for Pass with report-only publication.
 
 ## GitHub configuration
 
@@ -80,8 +87,17 @@ browse external URLs or execute code to substantiate claims.
 
 The publisher rereads PR/CI state, pins each review to `commit_id`, and dismisses
 only its own marked approvals when they become invalid. It also checks after
-approval for a concurrent head/base change. GitHub's review API cannot atomically
-compare-and-swap both head and base: this minimizes that race, not a merge lock.
+approval for a concurrent head/base change. Auto-approval requires a successful
+GitHub collaborator check for the **PR author on the target repository**, not
+the person triggering the workflow, a commit author, a historical contributor,
+or an organization membership label. The check uses the collaborator API and
+includes collaborator access through teams. It is repeated immediately before
+and after approval; a detected loss of membership withdraws the bot approval
+and retains Pass with report-only publication. An API failure never authorizes
+approval. Membership changes invalidate the cached review on the next workflow
+run; there is no continuous membership watcher. GitHub's review API cannot
+atomically compare-and-swap head, base and collaborator membership, so these
+checks minimize races without installing a merge lock.
 No new merge restriction is installed. One repository-level concurrency group
 serializes runs; each run scans open PRs so coalesced queued events lose no PRs.
 Fingerprints deduplicate completed unchanged reviews. API/model failures remain
@@ -133,7 +149,10 @@ Integration acceptance requires separate real PRs targeting this fork's `main`:
 | Clean docs spelling/translation | Pass; actual approval only in auto-approve mode |
 | Documented metric changed to contradict a pinned source | Human Review, with the actual factual issue |
 | Intentional legacy `letter` compatibility alias | No invented naming defect |
-| Core-code change | Human Review regardless of clean CI |
+| Clean code/configuration change with complete review and passing CI | Pass, report only |
+| Clean documentation by a current repository collaborator | Pass; eligible for auto-approve |
+| Clean documentation by a non-collaborator or unverifiable author | Pass, report only |
+| Author loses collaborator access before/during approval | No approval, or dismiss the test approval |
 | Failed CI | Human Review; CI stays red |
 | CI still running | Wait; no approval |
 | New head/base during review | Discard old result; withdraw obsolete bot approval |
@@ -152,5 +171,6 @@ Start upstream in report-only mode before considering automatic approvals.
 References: [GitHub workflow events](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows),
 [secure Actions use](https://docs.github.com/en/actions/reference/security/secure-use),
 [reviews API](https://docs.github.com/en/rest/pulls/reviews),
+[collaborator API](https://docs.github.com/en/rest/collaborators/collaborators#check-if-a-user-is-a-repository-collaborator),
 [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs),
 [OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs).

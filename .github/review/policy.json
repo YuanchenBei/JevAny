@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "documentation": ["README*.md", "CONTRIBUTING.md", "docs/**/*.md", "docs/*.md", "model_cards/**/*.md", "model_cards/*.md"],
   "pages_paths": ["site/**", "docs/**", "results/**", "reports/**", "README*.md", "CONTRIBUTING.md", "LICENSE", "examples/**", "recipes/**", ".github/workflows/pages.yml"],
   "ci": {"ci.yml": ["test", "test (minimum ML versions)", "report appendix"], "pages.yml": ["check"]},

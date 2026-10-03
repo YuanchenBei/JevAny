@@ -26,6 +26,7 @@ def file(path="docs/guide.md"):
 
 def pr():
     return {"number": 1, "state": "open", "draft": False, "labels": [],
+            "user": {"login": "author"}, "author_association": "COLLABORATOR",
             "head": {"sha": "a" * 40, "repo": {"full_name": "owner/fork"}},
             "base": {"sha": "b" * 40, "ref": "main"}, "changed_files": 1,
             "title": "Improve documentation", "body": "", "updated_at": "2099-01-01T00:00:00Z"}
@@ -74,6 +75,10 @@ class FakeGitHub:
                      for name in ["test", "test (minimum ML versions)", "report appendix", "check"]]
         self.mutate_after_review = False
         self.branch_tip = None
+        self.collaborator = True
+        self.membership_checks = 0
+        self.revoke_on_check = None
+        self.membership_error = None
 
     def pages(self, path, key=None, max_pages=30):
         if "/comments" in path:
@@ -90,6 +95,15 @@ class FakeGitHub:
 
     def repo_call(self, path, method="GET", body=None):
         self.calls.append((path, method, copy.deepcopy(body)))
+        if path == "/collaborators/author" and method == "GET":
+            self.membership_checks += 1
+            if self.membership_error:
+                raise self.membership_error
+            if self.revoke_on_check and self.membership_checks >= self.revoke_on_check:
+                self.collaborator = False
+            if not self.collaborator:
+                raise r.ReviewError("Not Found", http_status=404)
+            return None
         if path == "/pulls/1" and method == "GET":
             return copy.deepcopy(self.pr)
         if path == "/git/ref/heads/main" and method == "GET":
@@ -122,10 +136,11 @@ class PolicyTests(unittest.TestCase):
     def test_no_gpu_evidence_needed_for_prose(self):
         self.assertEqual(r.decide([file("README.md")], checks(), clean())[0], "pass")
 
-    def test_core_code_requires_human_even_without_findings(self):
-        self.assertEqual(r.decide([file("jevany/model.py")], checks(), clean())[0], "human-review")
+    def test_clean_code_and_configuration_can_pass(self):
+        for path in ["jevany/model.py", ".github/workflows/ci.yml", "pyproject.toml"]:
+            self.assertEqual(r.decide([file(path)], checks(), clean())[0], "pass")
 
-    def test_mixed_docs_and_code_requires_human(self):
+    def test_mixed_docs_and_code_is_not_documentation_only(self):
         self.assertFalse(r.documentation_only([file(), file("scripts/test.py")]))
 
     def test_renaming_code_into_docs_is_not_documentation_only(self):
@@ -373,6 +388,79 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(gh.reviews[0]["event"], "COMMENT")
         self.assertNotIn({"name": "ai:approved"}, gh.pr["labels"])
 
+    def test_clean_code_config_and_mixed_changes_only_report_pass(self):
+        for files in [[file("jevany/model.py")], [file("pyproject.toml")],
+                      [file(), file(".github/workflows/ci.yml")]]:
+            gh = FakeGitHub()
+            self.assertEqual(self.publish(gh, dict(record(), files=files)), "pass")
+            self.assertEqual(gh.reviews[0]["event"], "COMMENT")
+            self.assertNotIn({"name": "ai:approved"}, gh.pr["labels"])
+            self.assertIn("Pass (report only)", gh.comments[0]["body"])
+            self.assertEqual(gh.membership_checks, 0)
+
+    def test_noncollaborator_docs_pass_without_approval(self):
+        gh = FakeGitHub()
+        gh.collaborator = False
+        for association in ["CONTRIBUTOR", "MEMBER", "COLLABORATOR", "OWNER"]:
+            gh.pr["author_association"] = association
+            self.assertEqual(self.publish(gh), "pass")
+        self.assertEqual([v["event"] for v in gh.reviews], ["COMMENT"])
+        self.assertIn("not a current repository collaborator", gh.comments[0]["body"])
+        self.assertNotIn({"name": "ai:approved"}, gh.pr["labels"])
+
+    def test_collaboration_is_checked_for_author_not_actor_or_committer(self):
+        gh = FakeGitHub()
+        with patch.dict(os.environ, {"GITHUB_ACTOR": "other-actor"}):
+            self.publish(gh)
+        paths = [path for path, _, _ in gh.calls if path.startswith("/collaborators/")]
+        self.assertEqual(paths, ["/collaborators/author"] * 3)
+
+    def test_unknown_collaboration_reports_pass_and_remains_retryable(self):
+        for error in [r.ReviewError("Forbidden", http_status=403),
+                      r.ReviewError("Rate limited", http_status=429), r.ReviewError("Timeout")]:
+            gh = FakeGitHub()
+            gh.membership_error = error
+            self.assertEqual(self.publish(gh), "pass")
+            self.assertEqual(gh.reviews[0]["event"], "COMMENT")
+            self.assertIn("could not be verified", gh.comments[0]["body"])
+            self.assertNotIn("<!-- completed:", gh.comments[0]["body"])
+
+    def test_missing_author_cannot_auto_approve(self):
+        gh = FakeGitHub()
+        del gh.pr["user"]
+        self.assertEqual(self.publish(gh), "pass")
+        self.assertEqual(gh.reviews[0]["event"], "COMMENT")
+
+    def test_permission_revoked_immediately_before_approval(self):
+        gh = FakeGitHub()
+        gh.revoke_on_check = 2
+        self.assertEqual(self.publish(gh), "pass")
+        self.assertEqual([v["event"] for v in gh.reviews], ["COMMENT"])
+
+    def test_permission_revoked_after_approval_is_dismissed(self):
+        gh = FakeGitHub()
+        gh.revoke_on_check = 3
+        self.assertEqual(self.publish(gh), "pass")
+        self.assertEqual([v["state"] for v in gh.reviews], ["DISMISSED", "COMMENTED"])
+        self.assertNotIn({"name": "ai:approved"}, gh.pr["labels"])
+        self.assertIn("not a current repository collaborator", gh.comments[0]["body"])
+
+    def test_existing_approval_withdrawn_when_author_loses_membership(self):
+        gh = FakeGitHub()
+        self.publish(gh)
+        gh.collaborator = False
+        self.assertEqual(self.publish(gh), "pass")
+        self.assertEqual([v["state"] for v in gh.reviews], ["DISMISSED", "COMMENTED"])
+        self.assertEqual(len(gh.comments), 1)
+
+    def test_collaborator_change_invalidates_review_fingerprint(self):
+        gh = FakeGitHub()
+        args = (r.snapshot(pr()), [file()], checks(), "model", "auto-approve", True)
+        before = r.fingerprint(*args, author_access=r.collaborator_status(gh, pr()))
+        gh.collaborator = False
+        after = r.fingerprint(*args, author_access=r.collaborator_status(gh, pr()))
+        self.assertNotEqual(before, after)
+
     def test_rejected_review_cannot_apply_approved_label(self):
         gh = FakeGitHub()
         original = gh.repo_call
@@ -460,7 +548,7 @@ class PublicationTests(unittest.TestCase):
 
     def test_publisher_defends_against_inconsistent_pass(self):
         with self.assertRaises(r.ReviewError):
-            self.publish(FakeGitHub(), dict(record(), files=[file("jevany/model.py")]))
+            self.publish(FakeGitHub(), dict(record(), result=dict(clean(), findings=[finding()])))
 
     def test_no_reject_close_merge_or_code_mutation(self):
         gh = FakeGitHub()

@@ -30,6 +30,10 @@ LABELS = {"pass": "ai:approved", "human-review": "ai:human-review"}
 class ReviewError(Exception):
     """An incomplete review, with a safe, non-secret explanation."""
 
+    def __init__(self, message, http_status=None):
+        super().__init__(message)
+        self.http_status = http_status
+
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -61,7 +65,7 @@ def request_json(url, token, method="GET", body=None, timeout=60):
                 detail = ": " + "; ".join(m for m in messages if m)[:800]
             except (ValueError, AttributeError):
                 pass
-        raise ReviewError(f"API request failed (HTTP {error.code}){detail}") from None
+        raise ReviewError(f"API request failed (HTTP {error.code}){detail}", http_status=error.code) from None
     except (urllib.error.URLError, TimeoutError, ValueError):
         raise ReviewError("API request timed out, failed, or returned invalid JSON") from None
 
@@ -107,6 +111,51 @@ def documentation_only(files):
         and matches(f.get("previous_filename", f["filename"]), POLICY["documentation"])
         for f in files
     )
+
+
+def collaborator_status(gh, pr):
+    """Check the PR author against this repository, not the triggering actor.
+
+    author_association=CONTRIBUTOR/MEMBER is not proof of current repository
+    collaboration. GitHub's collaborator endpoint also covers access via teams.
+    """
+    login = pr.get("user", {}).get("login")
+    status = {"login": login, "verified": False, "collaborator": False}
+    if not isinstance(login, str) or not login:
+        return status
+    try:
+        response = gh.repo_call(f"/collaborators/{urllib.parse.quote(login, safe='')}")
+    except ReviewError as exc:
+        if exc.http_status == 404:
+            status["verified"] = True
+        return status
+    # A successful membership check returns HTTP 204 with no response body.
+    if response is None:
+        status.update(verified=True, collaborator=True)
+    return status
+
+
+def publication_plan(gh, pr, record, mode):
+    """A clean review is distinct from permission to submit GitHub APPROVE."""
+    plan = {"event": "COMMENT", "reason": "Human Review: see the findings and review evidence."}
+    if record["decision"] == "pending":
+        return {"event": None, "reason": "Waiting for review; no approval is submitted."}
+    if record["decision"] != "pass":
+        return plan
+    if mode != "auto-approve":
+        plan["reason"] = "Pass (report only): automatic approval is disabled by the workflow mode."
+    elif not documentation_only(record["files"]):
+        plan["reason"] = "Pass (report only): code, configuration and other non-documentation changes are never auto-approved."
+    else:
+        access = collaborator_status(gh, pr)
+        plan["author_access"] = access
+        if not access["verified"]:
+            plan["reason"] = "Pass (report only): the PR author's current repository collaborator status could not be verified."
+        elif not access["collaborator"]:
+            plan["reason"] = "Pass (report only): the PR author is not a current repository collaborator."
+        else:
+            plan.update(event="APPROVE", reason="Auto-approve: documentation-only Pass by a verified current repository collaborator.")
+    return plan
 
 
 def applicable_workflows(files):
@@ -378,21 +427,20 @@ def decide(files, checks, result, error=None):
     if result is None or not result["coverage_complete"]:
         return "human-review", ["AI review coverage is incomplete."]
     reasons = []
-    if not documentation_only(files):
-        reasons.append("Changes outside ordinary documentation require human review under the current policy.")
     if result["findings"]:
         reasons.append("The review identified substantive findings; see the evidence below.")
     reasons.extend(result["uncertainties"])
-    return ("human-review", reasons) if reasons else ("pass", ["Applicable CI passed and the complete documentation review found no substantive issue."])
+    return ("human-review", reasons) if reasons else ("pass", ["Applicable CI passed and the complete review found no substantive issue."])
 
 
 def own(item):
     return item.get("user", {}).get("login") == BOT and MARKER in (item.get("body") or "")
 
 
-def fingerprint(expected, files, checks, model, mode, configured, provider="openai"):
+def fingerprint(expected, files, checks, model, mode, configured, provider="openai", author_access=None):
     return digest({"snapshot": expected, "files": files, "ci": checks, "model": model,
                    "mode": mode, "configured": configured, "provider": provider,
+                   "author_access": author_access,
                    "policy": POLICY, "prompt": PROMPT, "schema": SCHEMA,
                    "controller": hashlib.sha256((ROOT / "review.py").read_bytes()).hexdigest()})
 
@@ -402,7 +450,8 @@ def evaluate_one(gh, pr, model, mode, key, provider="openai"):
     checks = ci_evidence(gh, pr, files)
     record = {"snapshot": snapshot(pr), "files": files, "ci": checks, "mode": mode,
               "result": None, "model": None, "sources": {}, "merge_base": None}
-    record["fingerprint"] = digest([fingerprint(record["snapshot"], files, checks, model, mode, bool(key), provider), pr["draft"]])
+    author_access = collaborator_status(gh, pr) if mode == "auto-approve" and documentation_only(files) else None
+    record["fingerprint"] = digest([fingerprint(record["snapshot"], files, checks, model, mode, bool(key), provider, author_access), pr["draft"]])
     comments = gh.pages(f"/issues/{pr['number']}/comments")
     key_marker = f"<!-- completed:{record['fingerprint']} -->"
     if any(own(c) and key_marker in c["body"] for c in comments):
@@ -439,7 +488,9 @@ def render(gh, record):
     title = {"pass": "Pass", "human-review": "Human Review", "pending": "Waiting for review"}[record["decision"]]
     expected = record["snapshot"]
     lines = [MARKER, f"### {title}", "", *[f"- {safe(reason)}" for reason in record["reasons"]], ""]
-    if record["mode"] == "report-only":
+    if record.get("publication"):
+        lines += [safe(record["publication"]["reason"]), ""]
+    elif record["mode"] == "report-only":
         lines += ["Report-only mode: no approval is submitted.", ""]
     result = record.get("result")
     if result:
@@ -487,6 +538,7 @@ def invalidate(gh, pr):
 
 
 def publish_one(gh, record, mode):
+    record = dict(record)
     expected = record["snapshot"]
     number = expected["number"]
     pr = load_pr(gh, number)
@@ -501,29 +553,47 @@ def publish_one(gh, record, mode):
         record = dict(record, ci=checks, decision="pending", result=None, retryable=True,
                       reasons=["PR or CI changed during review; waiting for a fresh evaluation."])
     record["mode"] = mode
-    approve = record["decision"] == "pass" and mode == "auto-approve" and not pr["draft"]
-    if approve and (not documentation_only(record["files"]) or ci_state(checks) != "passed"
+    if record["decision"] == "pass" and (ci_state(checks) != "passed"
                     or record["result"] is None or not record["result"]["coverage_complete"]
                     or record["result"]["findings"] or record["result"]["uncertainties"]):
         raise ReviewError("Publication invariants failed; approval refused")
+
+    def refresh_plan(fresh):
+        record["publication"] = publication_plan(gh, fresh, record, mode)
+        access = record["publication"].get("author_access")
+        if access is not None and not access["verified"]:
+            record["retryable"] = True
+        return record["publication"]["event"] == "APPROVE"
+
+    approve = refresh_plan(pr)
     withdraw_approvals(gh, number, keep_head=expected["head"] if approve else None)
     body = render(gh, record)
     if len(body) > 60000:
         raise ReviewError("Rendered review exceeds GitHub's comment limit")
     comments = [c for c in gh.pages(f"/issues/{number}/comments") if own(c)]
     reviews = gh.pages(f"/pulls/{number}/reviews")
-    event = "APPROVE" if approve else "COMMENT"
-    review_key = f"<!-- review:{record['fingerprint']}:{event} -->"
-    if record["decision"] != "pending" and not any(own(r) and review_key in r["body"] and r["state"] != "DISMISSED" for r in reviews):
-        fresh = load_pr(gh, number)
-        if not current(fresh, expected):
-            invalidate(gh, fresh)
-            return "stale"
-        try:
+
+    def submit(event):
+        review_key = f"<!-- review:{record['fingerprint']}:{event} -->"
+        if not any(own(r) and review_key in r["body"] and r["state"] != "DISMISSED" for r in reviews):
             gh.repo_call(f"/pulls/{number}/reviews", "POST", {
                 "commit_id": expected["head"], "event": event,
                 "body": f"{MARKER}\n{review_key}\n{record['decision'].title()}. See the maintained PR review summary for evidence."
             })
+
+    if record["decision"] != "pending":
+        fresh = load_pr(gh, number)
+        if not current(fresh, expected):
+            invalidate(gh, fresh)
+            return "stale"
+        # Recheck the author's membership immediately before any approval API
+        # request, including when a previous approval is reused.
+        if approve:
+            approve = refresh_plan(fresh)
+            if not approve:
+                withdraw_approvals(gh, number)
+        try:
+            submit("APPROVE" if approve else "COMMENT")
         except ReviewError as exc:
             if not approve:
                 raise
@@ -531,13 +601,22 @@ def publish_one(gh, record, mode):
             approve = False
             record = dict(record, decision="human-review", retryable=True,
                           reasons=[f"GitHub did not accept the approval: {exc}"])
-            body = render(gh, record)
-            fallback_key = f"<!-- review:{record['fingerprint']}:COMMENT -->"
-            if not any(own(v) and fallback_key in v["body"] for v in reviews):
-                gh.repo_call(f"/pulls/{number}/reviews", "POST", {
-                    "commit_id": expected["head"], "event": "COMMENT",
-                    "body": f"{MARKER}\n{fallback_key}\nHuman Review. GitHub did not accept automated approval; see the maintained summary."
-                })
+            refresh_plan(fresh)
+            submit("COMMENT")
+    # Detect head/base or membership changes after the approval request, before
+    # publishing the success summary and label. GitHub has no atomic ACL/PR CAS.
+    if approve:
+        fresh = load_pr(gh, number)
+        if not current(fresh, expected):
+            invalidate(gh, fresh)
+            return "stale"
+        approve = refresh_plan(fresh)
+        if not approve:
+            withdraw_approvals(gh, number)
+            submit("COMMENT")
+    body = render(gh, record)
+    if len(body) > 60000:
+        raise ReviewError("Rendered review exceeds GitHub's comment limit")
     # Only apply the success label after GitHub actually accepts the review.
     # Report-only Pass is shown in the summary, not as an approval label.
     label = LABELS.get(record["decision"]) if record["decision"] != "pass" or approve else None
@@ -553,12 +632,6 @@ def publish_one(gh, record, mode):
             gh.repo_call(f"/issues/comments/{comments[-1]['id']}", "PATCH", {"body": body})
     else:
         gh.repo_call(f"/issues/{number}/comments", "POST", {"body": body})
-    # commit_id binds approval to the reviewed head; also detect a base/head race.
-    if approve:
-        fresh = load_pr(gh, number)
-        if not current(fresh, expected):
-            invalidate(gh, fresh)
-            return "stale"
     return record["decision"]
 
 
